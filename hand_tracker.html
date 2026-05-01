@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Hand Tracker — Real-time Skeleton Overlay</title>
+<style>
+  :root {
+    --bg: #1a1a1a;
+    --panel: #2a2a2a;
+    --border: #3a3a3a;
+    --text: #e0e0e0;
+    --muted: #888;
+    --accent: #ff8800;
+    --skeleton: #00ff44;
+    --joint: #ff2222;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace;
+    height: 100%;
+    overflow: hidden;
+  }
+  .app {
+    display: grid;
+    grid-template-rows: 36px 1fr 56px;
+    height: 100vh;
+  }
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 0 14px;
+    background: linear-gradient(#2c2c2c, #222);
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--muted);
+    user-select: none;
+  }
+  .topbar .menu { cursor: pointer; padding: 4px 8px; border-radius: 3px; }
+  .topbar .menu:hover { background: #333; color: #fff; }
+  .topbar .status { margin-left: auto; display: flex; gap: 14px; align-items: center; }
+  .topbar .led {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #444; box-shadow: 0 0 6px transparent;
+    transition: all .2s;
+  }
+  .topbar .led.live { background: #2ecc71; box-shadow: 0 0 8px #2ecc71; }
+
+  .stage {
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #0d0d0d;
+  }
+  .videoWrap {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  video, canvas {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%) scaleX(-1); /* mirror */
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+  }
+  video { z-index: 1; }
+  canvas { z-index: 2; pointer-events: none; }
+
+  .startOverlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(10,10,10,0.92);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    z-index: 10;
+    text-align: center;
+    padding: 20px;
+  }
+  .startOverlay h1 {
+    margin: 0;
+    font-size: 22px;
+    color: #fff;
+    letter-spacing: 1px;
+  }
+  .startOverlay p { margin: 0; color: var(--muted); max-width: 420px; line-height: 1.5; font-size: 13px; }
+  .startBtn {
+    background: var(--accent);
+    color: #111;
+    border: none;
+    padding: 12px 28px;
+    font-size: 14px;
+    font-weight: 700;
+    border-radius: 4px;
+    cursor: pointer;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  .startBtn:hover { filter: brightness(1.1); }
+  .startBtn:disabled { opacity: 0.5; cursor: wait; }
+
+  .timeline {
+    background: linear-gradient(#222, #1a1a1a);
+    border-top: 1px solid var(--border);
+    display: grid;
+    grid-template-columns: 200px 1fr 200px;
+    gap: 1px;
+    background-color: var(--border);
+  }
+  .timeline > div {
+    background: #1a1a1a;
+    padding: 8px 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .stat { display: flex; flex-direction: column; gap: 2px; }
+  .stat .label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat .val { color: #fff; font-size: 13px; font-family: monospace; }
+  .timecode {
+    background: #0d0d0d !important;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 4px 12px !important;
+    font-family: monospace;
+    color: #fff !important;
+    font-size: 16px !important;
+    justify-content: center !important;
+  }
+  .center { justify-content: center; gap: 30px; }
+  .right { justify-content: flex-end; }
+
+  .err {
+    background: #4a1a1a;
+    color: #ffaaaa;
+    padding: 10px 14px;
+    border-radius: 4px;
+    font-size: 12px;
+    max-width: 420px;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- Top toolbar -->
+  <div class="topbar">
+    <span style="color:#fff; font-weight:600;">HandTrack</span>
+    <span class="menu">FILE</span>
+    <span class="menu">EDIT</span>
+    <span class="menu">VIEW</span>
+    <span class="menu">TUTORIALS</span>
+    <div class="status">
+      <span>FPS: <span id="fpsTop">--</span></span>
+      <span>GPU</span>
+      <span class="led" id="liveLed"></span>
+      <span id="statusText">Idle</span>
+    </div>
+  </div>
+
+  <!-- Stage / video -->
+  <div class="stage">
+    <div class="videoWrap">
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="canvas"></canvas>
+    </div>
+
+    <div class="startOverlay" id="startOverlay">
+      <h1>Real-time Hand Tracking</h1>
+      <p>Click start, allow webcam access, and your hand skeleton will be tracked live with green bones and red joints.</p>
+      <button class="startBtn" id="startBtn">Start Camera</button>
+      <div class="err" id="errBox" style="display:none;"></div>
+    </div>
+  </div>
+
+  <!-- Bottom bar -->
+  <div class="timeline">
+    <div>
+      <div class="stat">
+        <span class="label">Hands</span>
+        <span class="val" id="handCount">0</span>
+      </div>
+      <div class="stat">
+        <span class="label">Landmarks</span>
+        <span class="val" id="lmCount">0</span>
+      </div>
+    </div>
+    <div class="center">
+      <div class="timecode" id="timecode">00:00:00:00</div>
+      <div class="stat">
+        <span class="label">Frame</span>
+        <span class="val" id="frameNum">0</span>
+      </div>
+    </div>
+    <div class="right">
+      <div class="stat" style="text-align:right;">
+        <span class="label">Resolution</span>
+        <span class="val" id="resText">--</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- MediaPipe Hands -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1675466124/drawing_utils.js" crossorigin="anonymous"></script>
+
+<script>
+  const videoEl    = document.getElementById('video');
+  const canvasEl   = document.getElementById('canvas');
+  const ctx        = canvasEl.getContext('2d');
+  const startBtn   = document.getElementById('startBtn');
+  const overlay    = document.getElementById('startOverlay');
+  const errBox     = document.getElementById('errBox');
+  const liveLed    = document.getElementById('liveLed');
+  const statusText = document.getElementById('statusText');
+
+  const fpsTop     = document.getElementById('fpsTop');
+  const handCount  = document.getElementById('handCount');
+  const lmCount    = document.getElementById('lmCount');
+  const timecode   = document.getElementById('timecode');
+  const frameNum   = document.getElementById('frameNum');
+  const resText    = document.getElementById('resText');
+
+  // FPS tracking
+  let frame = 0;
+  let lastFpsUpdate = performance.now();
+  let fpsFrames = 0;
+  const t0 = performance.now();
+
+  function updateTimecode() {
+    const elapsedMs = performance.now() - t0;
+    const total = Math.floor(elapsedMs);
+    const ms = total % 1000;
+    const s  = Math.floor(total / 1000) % 60;
+    const m  = Math.floor(total / 60000) % 60;
+    const h  = Math.floor(total / 3600000);
+    const ff = Math.floor(ms / (1000 / 30)); // 30fps frame counter
+    const pad = (n, l = 2) => String(n).padStart(l, '0');
+    timecode.textContent = `${pad(h)}:${pad(m)}:${pad(s)}:${pad(ff)}`;
+  }
+
+  // Connections between landmarks for the hand skeleton (MediaPipe spec)
+  const HAND_CONNECTIONS = [
+    [0,1],[1,2],[2,3],[3,4],            // thumb
+    [0,5],[5,6],[6,7],[7,8],            // index
+    [5,9],[9,10],[10,11],[11,12],       // middle
+    [9,13],[13,14],[14,15],[15,16],     // ring
+    [13,17],[17,18],[18,19],[19,20],    // pinky
+    [0,17]                              // palm base
+  ];
+
+  function drawSkeleton(landmarks) {
+    const w = canvasEl.width;
+    const h = canvasEl.height;
+
+    // green bones
+    ctx.strokeStyle = '#00ff44';
+    ctx.lineWidth   = 3;
+    ctx.lineCap     = 'round';
+    ctx.lineJoin    = 'round';
+    ctx.shadowColor = '#00ff44';
+    ctx.shadowBlur  = 6;
+
+    ctx.beginPath();
+    for (const [a, b] of HAND_CONNECTIONS) {
+      const p1 = landmarks[a];
+      const p2 = landmarks[b];
+      ctx.moveTo(p1.x * w, p1.y * h);
+      ctx.lineTo(p2.x * w, p2.y * h);
+    }
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // red joints
+    ctx.fillStyle = '#ff2222';
+    for (const lm of landmarks) {
+      ctx.beginPath();
+      ctx.arc(lm.x * w, lm.y * h, 4.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // brighter outline ring on joints
+    ctx.strokeStyle = '#ff6666';
+    ctx.lineWidth = 1;
+    for (const lm of landmarks) {
+      ctx.beginPath();
+      ctx.arc(lm.x * w, lm.y * h, 4.5, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  function onResults(results) {
+    frame++;
+    fpsFrames++;
+
+    const now = performance.now();
+    if (now - lastFpsUpdate >= 500) {
+      const fps = (fpsFrames * 1000 / (now - lastFpsUpdate)).toFixed(1);
+      fpsTop.textContent = fps;
+      lastFpsUpdate = now;
+      fpsFrames = 0;
+    }
+    updateTimecode();
+    frameNum.textContent = frame;
+
+    // Match canvas size to actual video display
+    const vw = videoEl.videoWidth;
+    const vh = videoEl.videoHeight;
+    if (vw && vh && (canvasEl.width !== vw || canvasEl.height !== vh)) {
+      canvasEl.width = vw;
+      canvasEl.height = vh;
+      resText.textContent = `${vw}×${vh}`;
+    }
+
+    // Match displayed video element size to canvas
+    const rect = videoEl.getBoundingClientRect();
+    canvasEl.style.width  = rect.width  + 'px';
+    canvasEl.style.height = rect.height + 'px';
+
+    ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+
+    const hands = results.multiHandLandmarks || [];
+    handCount.textContent = hands.length;
+    let totalLm = 0;
+    for (const lm of hands) {
+      drawSkeleton(lm);
+      totalLm += lm.length;
+    }
+    lmCount.textContent = totalLm;
+  }
+
+  let hands = null;
+  let rafId = null;
+
+  async function start() {
+    startBtn.disabled = true;
+    startBtn.textContent = 'Starting...';
+    errBox.style.display = 'none';
+
+    try {
+      // 1. Init MediaPipe Hands
+      hands = new Hands({
+        locateFile: (file) =>
+          `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`
+      });
+      hands.setOptions({
+        maxNumHands: 2,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.6,
+        minTrackingConfidence: 0.6
+      });
+      hands.onResults(onResults);
+
+      // 2. Get webcam
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
+        audio: false
+      });
+      videoEl.srcObject = stream;
+      await videoEl.play();
+
+      // 3. Hide overlay
+      overlay.style.display = 'none';
+      liveLed.classList.add('live');
+      statusText.textContent = 'Live';
+
+      // 4. Pump frames into MediaPipe
+      const pump = async () => {
+        if (videoEl.readyState >= 2) {
+          await hands.send({ image: videoEl });
+        }
+        rafId = requestAnimationFrame(pump);
+      };
+      pump();
+    } catch (e) {
+      console.error(e);
+      errBox.textContent = 'Error: ' + e.message + '. Make sure you opened this file via http(s):// or file://, allowed camera access, and that no other app is using the webcam.';
+      errBox.style.display = 'block';
+      startBtn.disabled = false;
+      startBtn.textContent = 'Try Again';
+    }
+  }
+
+  startBtn.addEventListener('click', start);
+  setInterval(updateTimecode, 33);
+</script>
+</body>
+</html>
